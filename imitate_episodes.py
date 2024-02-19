@@ -1,4 +1,5 @@
 import torch
+from torchinfo import summary
 import numpy as np
 import os
 import pickle
@@ -145,7 +146,8 @@ def main(args):
     config_path = os.path.join(ckpt_dir, 'config.pkl')
     expr_name = ckpt_dir.split('/')[-1]
     if not is_eval:
-        wandb.init(project="mobile-aloha2", reinit=True, entity="mobile-aloha2", name=expr_name)
+        #wandb.init(project="mobile-aloha2", reinit=True, entity="mobile-aloha2", name=expr_name)
+        wandb.init(project="my-test-mobile-aloha2", reinit=True, name=expr_name)
         wandb.config.update(config)
     with open(config_path, 'wb') as f:
         pickle.dump(config, f)
@@ -162,14 +164,25 @@ def main(args):
         print()
         exit()
 
-    train_dataloader, val_dataloader, stats, _ = load_data(dataset_dir, name_filter, camera_names, batch_size_train, batch_size_val, args['chunk_size'], args['skip_mirrored_data'], config['load_pretrain'], policy_class, stats_dir_l=stats_dir, sample_weights=sample_weights, train_ratio=train_ratio)
+    train_dataloader, val_dataloader, stats, _ = load_data(dataset_dir, 
+                                                           name_filter, 
+                                                           camera_names, 
+                                                           batch_size_train, 
+                                                           batch_size_val, 
+                                                           args['chunk_size'], 
+                                                           args['skip_mirrored_data'], 
+                                                           config['load_pretrain'], 
+                                                           policy_class, 
+                                                           stats_dir_l=stats_dir, 
+                                                           sample_weights=sample_weights, 
+                                                           train_ratio=train_ratio)
 
     # save dataset stats
     stats_path = os.path.join(ckpt_dir, f'dataset_stats.pkl')
     with open(stats_path, 'wb') as f:
         pickle.dump(stats, f)
 
-    best_ckpt_info = train_bc(train_dataloader, val_dataloader, config)
+    best_ckpt_info = train_bc(train_dataloader, val_dataloader, config, args['verbose'])
     best_step, min_val_loss, best_state_dict = best_ckpt_info
 
     # save best checkpoint
@@ -244,11 +257,13 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=50):
 
     # load policy and stats
     ckpt_path = os.path.join(ckpt_dir, ckpt_name)
-    policy = make_policy(policy_class, policy_config)
-    loading_status = policy.deserialize(torch.load(ckpt_path))
+    policy_model = make_policy(policy_class, policy_config)
+    loading_status = policy_model.deserialize(torch.load(ckpt_path))
     print(loading_status)
-    policy.cuda()
-    policy.eval()
+
+
+    policy_model.cuda()
+    policy_model.eval()
     if vq:
         vq_dim = config['policy_config']['vq_dim']
         vq_class = config['policy_config']['vq_class']
@@ -377,7 +392,7 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=50):
                 if t == 0:
                     # warm up
                     for _ in range(10):
-                        policy(qpos, curr_image)
+                        policy_model(qpos, curr_image)
                     print('network warm up done')
                     time1 = time.time()
 
@@ -391,10 +406,10 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=50):
                                     vq_sample = latent_model.generate(1, temperature=1, x=None)
                                     print(torch.nonzero(vq_sample[0])[:, 1].cpu().numpy())
                             vq_sample = latent_model.generate(1, temperature=1, x=None)
-                            all_actions = policy(qpos, curr_image, vq_sample=vq_sample)
+                            all_actions = policy_model(qpos, curr_image, vq_sample=vq_sample)
                         else:
                             # e()
-                            all_actions = policy(qpos, curr_image)
+                            all_actions = policy_model(qpos, curr_image)
                         # if use_actuator_net:
                         #     collect_base_action(all_actions, norm_episode_all_base_actions)
                         if real_robot:
@@ -416,14 +431,14 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=50):
                         #     raw_action[0, -2:] = 0
                 elif config['policy_class'] == "Diffusion":
                     if t % query_frequency == 0:
-                        all_actions = policy(qpos, curr_image)
+                        all_actions = policy_model(qpos, curr_image)
                         # if use_actuator_net:
                         #     collect_base_action(all_actions, norm_episode_all_base_actions)
                         if real_robot:
                             all_actions = torch.cat([all_actions[:, :-BASE_DELAY, :-2], all_actions[:, BASE_DELAY:, -2:]], dim=2)
                     raw_action = all_actions[:, t % query_frequency]
                 elif config['policy_class'] == "CNNMLP":
-                    raw_action = policy(qpos, curr_image)
+                    raw_action = policy_model(qpos, curr_image)
                     all_actions = raw_action.unsqueeze(0)
                     # if use_actuator_net:
                     #     collect_base_action(all_actions, norm_episode_all_base_actions)
@@ -532,7 +547,7 @@ def forward_pass(data, policy):
     return policy(qpos_data, image_data, action_data, is_pad) # TODO remove None
 
 
-def train_bc(train_dataloader, val_dataloader, config):
+def train_bc(train_dataloader, val_dataloader, config, if_verbose=False):
     num_steps = config['num_steps']
     ckpt_dir = config['ckpt_dir']
     seed = config['seed']
@@ -544,15 +559,25 @@ def train_bc(train_dataloader, val_dataloader, config):
 
     set_seed(seed)
 
-    policy = make_policy(policy_class, policy_config)
+    policy_model = make_policy(policy_class, policy_config)
+    if if_verbose:
+        print("policy_model's state_dict:")
+        for param_tensor in policy_model.state_dict():
+            print(param_tensor, "\t", policy_model.state_dict()[param_tensor].size())
+        print("------")
+        print("policy_model's summary:")
+        # qpos, image
+        summary(policy_model, [(1,14), (1, 3, 3, 480, 640)], dtypes=[torch.float32, torch.float32])
+        print("------")
+
     if config['load_pretrain']:
-        loading_status = policy.deserialize(torch.load(os.path.join('/home/zfu/interbotix_ws/src/act/ckpts/pretrain_all', 'policy_step_50000_seed_0.ckpt')))
+        loading_status = policy_model.deserialize(torch.load(os.path.join('/home/zfu/interbotix_ws/src/act/ckpts/pretrain_all', 'policy_step_50000_seed_0.ckpt')))
         print(f'loaded! {loading_status}')
     if config['resume_ckpt_path'] is not None:
-        loading_status = policy.deserialize(torch.load(config['resume_ckpt_path']))
+        loading_status = policy_model.deserialize(torch.load(config['resume_ckpt_path']))
         print(f'Resume policy from: {config["resume_ckpt_path"]}, Status: {loading_status}')
-    policy.cuda()
-    optimizer = make_optimizer(policy_class, policy)
+    policy_model.cuda()
+    optimizer = make_optimizer(policy_class, policy_model)
 
     min_val_loss = np.inf
     best_ckpt_info = None
@@ -564,10 +589,10 @@ def train_bc(train_dataloader, val_dataloader, config):
             print('validating')
 
             with torch.inference_mode():
-                policy.eval()
+                policy_model.eval()
                 validation_dicts = []
                 for batch_idx, data in enumerate(val_dataloader):
-                    forward_dict = forward_pass(data, policy)
+                    forward_dict = forward_pass(data, policy_model)
                     validation_dicts.append(forward_dict)
                     if batch_idx > 50:
                         break
@@ -577,7 +602,7 @@ def train_bc(train_dataloader, val_dataloader, config):
                 epoch_val_loss = validation_summary['loss']
                 if epoch_val_loss < min_val_loss:
                     min_val_loss = epoch_val_loss
-                    best_ckpt_info = (step, min_val_loss, deepcopy(policy.serialize()))
+                    best_ckpt_info = (step, min_val_loss, deepcopy(policy_model.serialize()))
             for k in list(validation_summary.keys()):
                 validation_summary[f'val_{k}'] = validation_summary.pop(k)            
             wandb.log(validation_summary, step=step)
@@ -592,15 +617,15 @@ def train_bc(train_dataloader, val_dataloader, config):
             # first save then eval
             ckpt_name = f'policy_step_{step}_seed_{seed}.ckpt'
             ckpt_path = os.path.join(ckpt_dir, ckpt_name)
-            torch.save(policy.serialize(), ckpt_path)
+            torch.save(policy_model.serialize(), ckpt_path)
             success, _ = eval_bc(config, ckpt_name, save_episode=True, num_rollouts=10)
             wandb.log({'success': success}, step=step)
 
         # training
-        policy.train()
+        policy_model.train()
         optimizer.zero_grad()
         data = next(train_dataloader)
-        forward_dict = forward_pass(data, policy)
+        forward_dict = forward_pass(data, policy_model)
         # backward
         loss = forward_dict['loss']
         loss.backward()
@@ -609,10 +634,10 @@ def train_bc(train_dataloader, val_dataloader, config):
 
         if step % save_every == 0:
             ckpt_path = os.path.join(ckpt_dir, f'policy_step_{step}_seed_{seed}.ckpt')
-            torch.save(policy.serialize(), ckpt_path)
+            torch.save(policy_model.serialize(), ckpt_path)
 
     ckpt_path = os.path.join(ckpt_dir, f'policy_last.ckpt')
-    torch.save(policy.serialize(), ckpt_path)
+    torch.save(policy_model.serialize(), ckpt_path)
 
     best_step, min_val_loss, best_state_dict = best_ckpt_info
     ckpt_path = os.path.join(ckpt_dir, f'policy_step_{best_step}_seed_{seed}.ckpt')
@@ -662,5 +687,6 @@ if __name__ == '__main__':
     parser.add_argument('--vq_class', action='store', type=int, help='vq_class')
     parser.add_argument('--vq_dim', action='store', type=int, help='vq_dim')
     parser.add_argument('--no_encoder', action='store_true')
-    
+    parser.add_argument("--verbose", action="store_true", help="print model info")
+
     main(vars(parser.parse_args()))
