@@ -79,7 +79,8 @@ def get_args_parser():
     parser.add_argument('--history_len', action='store', type=int)
     parser.add_argument('--future_len', action='store', type=int)
     parser.add_argument('--prediction_len', action='store', type=int)
-    
+    parser.add_argument("--verbose", action="store_true", help="print model info")
+
     return parser
 
 
@@ -91,6 +92,12 @@ def build_ACT_model_and_optimizer(args_override):
         setattr(args, k, v)
 
     model = build_ACT_model(args)
+    if args.verbose:
+        print("ACT_Model's state_dict:")
+        for param_tensor in model.state_dict():
+            print(param_tensor, "\t", model.state_dict()[param_tensor].size())
+        print("------")
+    
     model.cuda()
 
     param_dicts = [
